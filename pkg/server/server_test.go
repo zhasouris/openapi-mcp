@@ -149,6 +149,26 @@ func TestHttpMethodPostHandler(t *testing.T) {
 			},
 		},
 		{
+			name: "Valid Logging Set Level Request",
+			requestBodyFn: func(connID string) string {
+				return `{
+					"jsonrpc": "2.0",
+					"method": "logging/setLevel",
+					"id": "logging-post-1",
+					"params": {"level": "info"}
+				}`
+			},
+			expectedSyncStatus: http.StatusAccepted,
+			expectedSyncBody:   "Request accepted, response will be sent via SSE.\n",
+			checkAsyncResponse: func(t *testing.T, resp jsonRPCResponse) {
+				assert.Equal(t, "logging-post-1", resp.ID)
+				assert.Nil(t, resp.Error)
+				resultMap, ok := resp.Result.(map[string]interface{})
+				require.True(t, ok)
+				assert.Empty(t, resultMap)
+			},
+		},
+		{
 			name: "Valid Tool Call Request (Success)",
 			requestBodyFn: func(connID string) string {
 				return `{

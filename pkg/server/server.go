@@ -433,6 +433,8 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 			w.WriteHeader(http.StatusAccepted)
 			fmt.Fprintln(w, "Notification received.")
 			return // Return early, do not send anything on SSE channel
+		case "logging/setLevel":
+			respToSend = handleLoggingSetLevelJSONRPC(connID, &req)
 		case "tools/list":
 			respToSend = handleToolsListJSONRPC(connID, &req, toolSet)
 		case "tools/call":
@@ -516,6 +518,16 @@ func handleToolsListJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.Too
 		Jsonrpc: "2.0",
 		ID:      req.ID, // Match request ID
 		Result:  resultPayload,
+	}
+}
+
+func handleLoggingSetLevelJSONRPC(connID string, req *jsonRPCRequest) jsonRPCResponse {
+	log.Printf("Handling 'logging/setLevel' (JSON-RPC) for %s", connID)
+
+	return jsonRPCResponse{
+		Jsonrpc: "2.0",
+		ID:      req.ID,
+		Result:  map[string]interface{}{},
 	}
 }
 

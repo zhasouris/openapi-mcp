@@ -211,3 +211,24 @@ The `openapi-mcp` command accepts the following flags:
 ### Environment Variables
 
 *   `REQUEST_HEADERS`: Set this environment variable to a JSON string (e.g., `'{"X-Custom": "Value"}'`) to add custom headers to *all* outgoing requests to the target API.
+
+### Per-request Header Forwarding
+
+You can forward selected inbound request headers to outbound backend API calls by sending an inbound header named X-Forward-Headers-Map on each POST request to /mcp.
+
+Map format:
+*   Comma-separated list of header mappings.
+*   Each mapping uses Inbound-Header: Outbound-Header.
+*   Example value: X-Forward-Authorization: Authorization, X-Cache-Control: Cache-Control
+
+Behavior:
+*   The left side is treated as the exact inbound header name to read.
+*   If the inbound header exists, all of its values are forwarded.
+*   Existing outbound values for the mapped header are replaced.
+*   If a mapped inbound header is missing, it is logged and skipped.
+*   Malformed map entries are ignored one-by-one (other valid entries are still applied).
+
+Example:
+*   Inbound map header: X-Forward-Headers-Map: X-Forward-Authorization: Authorization
+*   Inbound value header: X-Forward-Authorization: bearer 123x
+*   Outbound backend header set by server: Authorization: bearer 123x

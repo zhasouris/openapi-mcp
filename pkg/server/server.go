@@ -438,7 +438,7 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 		case "tools/list":
 			respToSend = handleToolsListJSONRPC(connID, &req, toolSet)
 		case "tools/call":
-			respToSend = handleToolCallJSONRPC(connID, &req, toolSet, cfg)
+			respToSend = handleToolCallJSONRPC(connID, &req, toolSet, cfg, r.Header)
 		default:
 			log.Printf("Received unknown JSON-RPC method '%s' for %s", req.Method, connID)
 			respToSend = createJSONRPCError(reqID, -32601, fmt.Sprintf("Method not found: %s", req.Method), nil)
@@ -533,7 +533,7 @@ func handleLoggingSetLevelJSONRPC(connID string, req *jsonRPCRequest) jsonRPCRes
 
 // executeToolCall performs the actual HTTP request based on the resolved operation and parameters.
 // It now correctly handles API key injection based on the *cfg* parameter.
-func executeToolCall(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.Config) (*http.Response, error) {
+func executeToolCall(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.Config, inboundHeaders http.Header) (*http.Response, error) {
 	toolName := params.ToolName
 	toolInput := params.Input // This is the map[string]interface{} from the client
 
@@ -743,6 +743,8 @@ func executeToolCall(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.C
 		}
 	}
 
+	applyForwardedHeaders(req.Header, inboundHeaders)
+
 	// --- Add Cookies ---
 	for _, cookie := range cookieParams {
 		req.AddCookie(cookie)
@@ -767,7 +769,51 @@ func executeToolCall(params *ToolCallParams, toolSet *mcp.ToolSet, cfg *config.C
 	return resp, nil
 }
 
-func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.ToolSet, cfg *config.Config) jsonRPCResponse {
+func applyForwardedHeaders(outboundHeaders http.Header, inboundHeaders http.Header) {
+	if inboundHeaders == nil {
+		return
+	}
+
+	mapValue := strings.TrimSpace(inboundHeaders.Get("X-Forward-Headers-Map"))
+	if mapValue == "" {
+		return
+	}
+
+	for _, entry := range strings.Split(mapValue, ",") {
+		mapping := strings.TrimSpace(entry)
+		if mapping == "" {
+			continue
+		}
+
+		parts := strings.SplitN(mapping, ":", 2)
+		if len(parts) != 2 {
+			log.Printf("[ExecuteToolCall] Ignoring malformed X-Forward-Headers-Map entry: %q", mapping)
+			continue
+		}
+
+		inboundHeaderName := strings.TrimSpace(parts[0])
+		outboundHeaderName := strings.TrimSpace(parts[1])
+		if inboundHeaderName == "" || outboundHeaderName == "" {
+			log.Printf("[ExecuteToolCall] Ignoring malformed X-Forward-Headers-Map entry: %q", mapping)
+			continue
+		}
+
+		values := inboundHeaders.Values(inboundHeaderName)
+		if len(values) == 0 {
+			log.Printf("[ExecuteToolCall] Inbound header %q listed in X-Forward-Headers-Map was not present", inboundHeaderName)
+			continue
+		}
+
+		outboundHeaders.Del(outboundHeaderName)
+		for _, value := range values {
+			outboundHeaders.Add(outboundHeaderName, value)
+		}
+
+		log.Printf("[ExecuteToolCall] Forwarded inbound header %q to outbound header %q", inboundHeaderName, outboundHeaderName)
+	}
+}
+
+func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.ToolSet, cfg *config.Config, inboundHeaders http.Header) jsonRPCResponse {
 	// req.Params is interface{}, but should contain json.RawMessage for tools/call
 	rawParams, ok := req.Params.(json.RawMessage)
 	if !ok {
@@ -799,7 +845,7 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.Tool
 	log.Printf("Executing tool '%s' for %s with input: %+v", params.ToolName, connID, params.Input)
 
 	// --- Execute the actual tool call ---
-	httpResp, execErr := executeToolCall(&params, toolSet, cfg)
+	httpResp, execErr := executeToolCall(&params, toolSet, cfg, inboundHeaders)
 
 	// --- Process Response ---
 	var resultPayload ToolResultPayload

@@ -195,6 +195,33 @@ func TestHttpMethodPostHandler(t *testing.T) {
 			},
 		},
 		{
+			name: "Valid Tool Call Request (Forwarded Headers)",
+			requestBodyFn: func(connID string) string {
+				return `{
+					"jsonrpc": "2.0",
+					"method": "tools/call",
+					"id": "call-post-forward-1",
+					"params": {"name": "get_user", "arguments": {"user_id": "postUser"}}
+				}`
+			},
+			expectedSyncStatus: http.StatusAccepted,
+			expectedSyncBody:   "Request accepted, response will be sent via SSE.\n",
+			checkAsyncResponse: func(t *testing.T, resp jsonRPCResponse) {
+				assert.Equal(t, "call-post-forward-1", resp.ID)
+				assert.Nil(t, resp.Error)
+				resultPayload, ok := resp.Result.(ToolResultPayload)
+				require.True(t, ok)
+				assert.False(t, resultPayload.IsError)
+				require.Len(t, resultPayload.Content, 1)
+				assert.JSONEq(t, `{"id":"postUser"}`, resultPayload.Content[0].Text)
+			},
+			mockBackend: func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "bearer 123x", r.Header.Get("Authorization"))
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintln(w, `{"id":"postUser"}`)
+			},
+		},
+		{
 			name: "Valid Tool Call Request (Tool Not Found)",
 			requestBodyFn: func(connID string) string {
 				return `{
@@ -345,6 +372,10 @@ func TestHttpMethodPostHandler(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(reqBody))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("X-Connection-ID", connID) // Use the generated connID
+			if tc.name == "Valid Tool Call Request (Forwarded Headers)" {
+				req.Header.Set("X-Forward-Headers-Map", "X-Forward-Authorization: Authorization")
+				req.Header.Set("X-Forward-Authorization", "bearer 123x")
+			}
 			rr := httptest.NewRecorder()
 
 			httpMethodPostHandler(rr, req, toolSet, cfg)
@@ -461,6 +492,7 @@ func TestExecuteToolCall(t *testing.T) {
 		params            ToolCallParams
 		opDetail          mcp.OperationDetail
 		cfg               *config.Config
+		inboundHeaders    http.Header
 		expectError       bool
 		containsError     string
 		requestAsserter   func(t *testing.T, r *http.Request) // Function to assert details of the received HTTP request
@@ -480,6 +512,7 @@ func TestExecuteToolCall(t *testing.T) {
 				Parameters: []mcp.ParameterDetail{{Name: "item_id", In: "path"}},
 			},
 			cfg:               &config.Config{},
+			inboundHeaders:    nil,
 			expectError:       false,
 			backendStatusCode: http.StatusOK,
 			backendResponse:   `{"status":"ok"}`,
@@ -513,6 +546,7 @@ func TestExecuteToolCall(t *testing.T) {
 				},
 			},
 			cfg:               &config.Config{},
+			inboundHeaders:    nil,
 			expectError:       false,
 			backendStatusCode: http.StatusCreated,
 			backendResponse:   `{"id":"res456"}`,
@@ -541,6 +575,7 @@ func TestExecuteToolCall(t *testing.T) {
 				APIKeyName:     "Authorization",
 				APIKeyLocation: config.APIKeyLocationHeader,
 			},
+			inboundHeaders: nil,
 			expectError:       false,
 			backendStatusCode: http.StatusOK,
 			requestAsserter: func(t *testing.T, r *http.Request) {
@@ -560,6 +595,7 @@ func TestExecuteToolCall(t *testing.T) {
 				APIKeyName:     "api_key",
 				APIKeyLocation: config.APIKeyLocationQuery,
 			},
+			inboundHeaders: nil,
 			expectError:       false,
 			backendStatusCode: http.StatusOK,
 			requestAsserter: func(t *testing.T, r *http.Request) {
@@ -580,6 +616,7 @@ func TestExecuteToolCall(t *testing.T) {
 				APIKeyName:     "apiKey", // Matches the placeholder name
 				APIKeyLocation: config.APIKeyLocationPath,
 			},
+			inboundHeaders: nil,
 			expectError:       false,
 			backendStatusCode: http.StatusOK,
 			requestAsserter: func(t *testing.T, r *http.Request) {
@@ -599,6 +636,7 @@ func TestExecuteToolCall(t *testing.T) {
 				APIKeyName:     "AuthToken",
 				APIKeyLocation: config.APIKeyLocationCookie,
 			},
+			inboundHeaders: nil,
 			expectError:       false,
 			backendStatusCode: http.StatusOK,
 			requestAsserter: func(t *testing.T, r *http.Request) {
@@ -613,6 +651,7 @@ func TestExecuteToolCall(t *testing.T) {
 			params:            ToolCallParams{ToolName: "get_default_url", Input: map[string]interface{}{}},
 			opDetail:          mcp.OperationDetail{Method: "GET", Path: "/path1"}, // No BaseURL here
 			cfg:               &config.Config{},                                   // No global override
+			inboundHeaders:    nil,
 			expectError:       false,
 			backendStatusCode: http.StatusOK,
 			requestAsserter: func(t *testing.T, r *http.Request) {
@@ -626,11 +665,47 @@ func TestExecuteToolCall(t *testing.T) {
 			opDetail: mcp.OperationDetail{Method: "GET", Path: "/path2", BaseURL: "http://should-be-ignored.com"},
 			// cfg will be updated in test loop to point ServerBaseURL to mock server
 			cfg:               &config.Config{},
+			inboundHeaders:    nil,
 			expectError:       false,
 			backendStatusCode: http.StatusOK,
 			requestAsserter: func(t *testing.T, r *http.Request) {
 				// Should hit the mock server (set via cfg override) at the correct path
 				assert.Equal(t, "/path2", r.URL.Path)
+			},
+		},
+		{
+			name: "Forward inbound headers to outbound request",
+			params: ToolCallParams{
+				ToolName: "get_secure",
+				Input:    map[string]interface{}{},
+			},
+			opDetail: mcp.OperationDetail{Method: "GET", Path: "/secure"},
+			cfg:      &config.Config{},
+			inboundHeaders: http.Header{
+				"X-Forward-Headers-Map": []string{"X-Forward-Authorization: Authorization"},
+				"X-Forward-Authorization": []string{"bearer 123x", "bearer 456y"},
+			},
+			expectError:       false,
+			backendStatusCode: http.StatusOK,
+			requestAsserter: func(t *testing.T, r *http.Request) {
+				assert.Equal(t, []string{"bearer 123x", "bearer 456y"}, r.Header.Values("Authorization"))
+			},
+		},
+		{
+			name: "Ignore malformed forwarded header entries",
+			params: ToolCallParams{
+				ToolName: "get_secure",
+				Input:    map[string]interface{}{},
+			},
+			opDetail: mcp.OperationDetail{Method: "GET", Path: "/secure"},
+			cfg:      &config.Config{CustomHeaders: "Authorization: server-value"},
+			inboundHeaders: http.Header{
+				"X-Forward-Headers-Map": []string{"bad-entry, X-Forward-Authorization: Authorization"},
+			},
+			expectError:       false,
+			backendStatusCode: http.StatusOK,
+			requestAsserter: func(t *testing.T, r *http.Request) {
+				assert.Equal(t, "server-value", r.Header.Get("Authorization"))
 			},
 		},
 		// --- Error Case (Tool Not Found in ToolSet) ---
@@ -642,6 +717,7 @@ func TestExecuteToolCall(t *testing.T) {
 			},
 			opDetail:          mcp.OperationDetail{}, // Not used, error occurs before this
 			cfg:               &config.Config{},
+			inboundHeaders:    nil,
 			expectError:       true,
 			containsError:     "operation details for tool 'nonexistent' not found",
 			requestAsserter:   nil, // No request should be made
@@ -685,7 +761,7 @@ func TestExecuteToolCall(t *testing.T) {
 			}
 
 			// --- Execute Function ---
-			httpResp, err := executeToolCall(&tc.params, toolSet, &testCfg) // Use the potentially modified testCfg
+			httpResp, err := executeToolCall(&tc.params, toolSet, &testCfg, tc.inboundHeaders) // Use the potentially modified testCfg
 
 			// --- Assertions ---
 			if tc.expectError {
